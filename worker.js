@@ -9,6 +9,25 @@ const notificationUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/dat
 const startMsgUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md';
 
 const enable_notification = true
+
+// 数据库表初始化SQL
+const DB_INIT = `
+CREATE TABLE IF NOT EXISTS message_mappings (
+  message_id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_blocks (
+  chat_id INTEGER PRIMARY KEY,
+  is_blocked BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS last_messages (
+  chat_id INTEGER PRIMARY KEY,
+  timestamp INTEGER NOT NULL
+);
+`;
+
 /**
  * Return url to telegram api, optionally with parameters added
  */
@@ -48,6 +67,18 @@ function forwardMessage(msg){
 }
 
 /**
+ * 初始化数据库表结构
+ */
+async function initDatabase(env) {
+  try {
+    await env.DB.exec(DB_INIT);
+    console.log("数据库初始化成功");
+  } catch (error) {
+    console.error("数据库初始化失败:", error);
+  }
+}
+
+/**
  * Wait for requests to the worker
  */
 addEventListener('fetch', event => {
@@ -58,10 +89,20 @@ addEventListener('fetch', event => {
     event.respondWith(registerWebhook(event, url, WEBHOOK, SECRET))
   } else if (url.pathname === '/unRegisterWebhook') {
     event.respondWith(unRegisterWebhook(event))
+  } else if (url.pathname === '/initDB') {
+    event.respondWith(handleInitDB(event))
   } else {
     event.respondWith(new Response('No handler for this request'))
   }
 })
+
+/**
+ * 处理数据库初始化请求
+ */
+async function handleInitDB(event) {
+  await initDatabase(event.env);
+  return new Response('数据库初始化完成');
+}
 
 /**
  * Handle requests to WEBHOOK
@@ -73,10 +114,13 @@ async function handleWebhook (event) {
     return new Response('Unauthorized', { status: 403 })
   }
 
+  // 确保数据库初始化
+  await initDatabase(event.env);
+
   // Read request body synchronously
   const update = await event.request.json()
   // Deal with response asynchronously
-  event.waitUntil(onUpdate(update))
+  event.waitUntil(onUpdate(update, event.env))
 
   return new Response('Ok')
 }
@@ -85,9 +129,9 @@ async function handleWebhook (event) {
  * Handle incoming Update
  * https://core.telegram.org/bots/api#update
  */
-async function onUpdate (update) {
+async function onUpdate (update, env) {
   if ('message' in update) {
-    await onMessage(update.message)
+    await onMessage(update.message, env)
   }
 }
 
@@ -95,7 +139,7 @@ async function onUpdate (update) {
  * Handle incoming Message
  * https://core.telegram.org/bots/api#message
  */
-async function onMessage (message) {
+async function onMessage (message, env) {
   if(message.text === '/start'){
     let startMsg = await fetch(startMsgUrl).then(r => r.text())
     return sendMessage({
@@ -111,28 +155,47 @@ async function onMessage (message) {
       })
     }
     if(/^\/block$/.exec(message.text)){
-      return handleBlock(message)
+      return handleBlock(message, env)
     }
     if(/^\/unblock$/.exec(message.text)){
-      return handleUnBlock(message)
+      return handleUnBlock(message, env)
     }
     if(/^\/checkblock$/.exec(message.text)){
-      return checkBlock(message)
+      return checkBlock(message, env)
     }
-    let guestChantId = await nfd.get('msg-map-' + message?.reply_to_message.message_id,
-                                      { type: "json" })
+    
+    // 从数据库中获取消息映射
+    const { results } = await env.DB.prepare(
+      "SELECT chat_id FROM message_mappings WHERE message_id = ?"
+    ).bind(message.reply_to_message.message_id).all();
+    
+    if (results.length === 0) {
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text: '未找到对应的聊天记录'
+      });
+    }
+    
+    const guestChantId = results[0].chat_id;
+    
     return copyMessage({
       chat_id: guestChantId,
       from_chat_id:message.chat.id,
       message_id:message.message_id,
     })
   }
-  return handleGuestMessage(message)
+  return handleGuestMessage(message, env)
 }
 
-async function handleGuestMessage(message){
+async function handleGuestMessage(message, env){
   let chatId = message.chat.id;
-  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
+  
+  // 检查用户是否被屏蔽
+  const { results } = await env.DB.prepare(
+    "SELECT is_blocked FROM user_blocks WHERE chat_id = ?"
+  ).bind(chatId).all();
+  
+  const isblocked = results.length > 0 && results[0].is_blocked;
   
   if(isblocked){
     return sendMessage({
@@ -148,12 +211,15 @@ async function handleGuestMessage(message){
   })
   console.log(JSON.stringify(forwardReq))
   if(forwardReq.ok){
-    await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
+    // 保存消息ID映射到数据库
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO message_mappings (message_id, chat_id) VALUES (?, ?)"
+    ).bind(forwardReq.result.message_id, chatId).run();
   }
-  return handleNotify(message)
+  return handleNotify(message, env)
 }
 
-async function handleNotify(message){
+async function handleNotify(message, env){
   // 先判断是否是诈骗人员，如果是，则直接提醒
   // 如果不是，则根据时间间隔提醒：用户id，交易注意点等
   let chatId = message.chat.id;
@@ -164,9 +230,19 @@ async function handleNotify(message){
     })
   }
   if(enable_notification){
-    let lastMsgTime = await nfd.get('lastmsg-' + chatId, { type: "json" })
+    // 从数据库获取上次消息时间
+    const { results } = await env.DB.prepare(
+      "SELECT timestamp FROM last_messages WHERE chat_id = ?"
+    ).bind(chatId).all();
+    
+    const lastMsgTime = results.length > 0 ? results[0].timestamp : null;
+    
     if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL){
-      await nfd.put('lastmsg-' + chatId, Date.now())
+      // 更新最后消息时间
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO last_messages (chat_id, timestamp) VALUES (?, ?)"
+      ).bind(chatId, Date.now()).run();
+      
       return sendMessage({
         chat_id: ADMIN_UID,
         text:await fetch(notificationUrl).then(r => r.text())
@@ -175,16 +251,32 @@ async function handleNotify(message){
   }
 }
 
-async function handleBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
-                                      { type: "json" })
-  if(guestChantId === ADMIN_UID){
+async function handleBlock(message, env){
+  // 获取要屏蔽的用户ID
+  const { results } = await env.DB.prepare(
+    "SELECT chat_id FROM message_mappings WHERE message_id = ?"
+  ).bind(message.reply_to_message.message_id).all();
+  
+  if (results.length === 0) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '未找到对应的聊天记录'
+    });
+  }
+  
+  const guestChantId = results[0].chat_id;
+  
+  if(guestChantId.toString() === ADMIN_UID){
     return sendMessage({
       chat_id: ADMIN_UID,
       text:'不能屏蔽自己'
     })
   }
-  await nfd.put('isblocked-' + guestChantId, true)
+  
+  // 更新用户屏蔽状态
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO user_blocks (chat_id, is_blocked) VALUES (?, TRUE)"
+  ).bind(guestChantId).run();
 
   return sendMessage({
     chat_id: ADMIN_UID,
@@ -192,11 +284,25 @@ async function handleBlock(message){
   })
 }
 
-async function handleUnBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
-  { type: "json" })
+async function handleUnBlock(message, env){
+  // 获取要解除屏蔽的用户ID
+  const { results } = await env.DB.prepare(
+    "SELECT chat_id FROM message_mappings WHERE message_id = ?"
+  ).bind(message.reply_to_message.message_id).all();
+  
+  if (results.length === 0) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '未找到对应的聊天记录'
+    });
+  }
+  
+  const guestChantId = results[0].chat_id;
 
-  await nfd.put('isblocked-' + guestChantId, false)
+  // 更新用户屏蔽状态
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO user_blocks (chat_id, is_blocked) VALUES (?, FALSE)"
+  ).bind(guestChantId).run();
 
   return sendMessage({
     chat_id: ADMIN_UID,
@@ -204,10 +310,27 @@ async function handleUnBlock(message){
   })
 }
 
-async function checkBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
-  { type: "json" })
-  let blocked = await nfd.get('isblocked-' + guestChantId, { type: "json" })
+async function checkBlock(message, env){
+  // 获取要查询的用户ID
+  const { results: msgResults } = await env.DB.prepare(
+    "SELECT chat_id FROM message_mappings WHERE message_id = ?"
+  ).bind(message.reply_to_message.message_id).all();
+  
+  if (msgResults.length === 0) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '未找到对应的聊天记录'
+    });
+  }
+  
+  const guestChantId = msgResults[0].chat_id;
+  
+  // 查询用户屏蔽状态
+  const { results: blockResults } = await env.DB.prepare(
+    "SELECT is_blocked FROM user_blocks WHERE chat_id = ?"
+  ).bind(guestChantId).all();
+  
+  const blocked = blockResults.length > 0 && blockResults[0].is_blocked;
 
   return sendMessage({
     chat_id: ADMIN_UID,
@@ -231,6 +354,9 @@ async function sendPlainText (chatId, text) {
  * https://core.telegram.org/bots/api#setwebhook
  */
 async function registerWebhook (event, requestUrl, suffix, secret) {
+  // 确保数据库初始化
+  await initDatabase(event.env);
+  
   // https://core.telegram.org/bots/api#setwebhook
   const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${suffix}`
   const r = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: secret }))).json()
