@@ -1,7 +1,11 @@
-const TOKEN = ENV_BOT_TOKEN // Get it from @BotFather
-const WEBHOOK = '/endpoint'
-const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
-const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
+function getConfig(env) {
+  return {
+    TOKEN: env.ENV_BOT_TOKEN, // Get it from @BotFather
+    WEBHOOK: '/endpoint',
+    SECRET: env.ENV_BOT_SECRET, // A-Z, a-z, 0-9, _ and -
+    ADMIN_UID: env.ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
+  };
+}
 
 const NOTIFY_INTERVAL = 3600 * 1000;
 const fraudDb = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db';
@@ -31,7 +35,7 @@ CREATE TABLE IF NOT EXISTS last_messages (
 /**
  * Return url to telegram api, optionally with parameters added
  */
-function apiUrl (methodName, params = null) {
+function apiUrl (TOKEN, methodName, params = null) {
   let query = ''
   if (params) {
     query = '?' + new URLSearchParams(params).toString()
@@ -39,8 +43,8 @@ function apiUrl (methodName, params = null) {
   return `https://api.telegram.org/bot${TOKEN}/${methodName}${query}`
 }
 
-function requestTelegram(methodName, body, params = null){
-  return fetch(apiUrl(methodName, params), body)
+function requestTelegram(TOKEN, methodName, body, params = null){
+  return fetch(apiUrl(TOKEN, methodName, params), body)
     .then(r => r.json())
 }
 
@@ -54,16 +58,16 @@ function makeReqBody(body){
   }
 }
 
-function sendMessage(msg = {}){
-  return requestTelegram('sendMessage', makeReqBody(msg))
+function sendMessage(TOKEN, msg = {}){
+  return requestTelegram(TOKEN, 'sendMessage', makeReqBody(msg))
 }
 
-function copyMessage(msg = {}){
-  return requestTelegram('copyMessage', makeReqBody(msg))
+function copyMessage(TOKEN, msg = {}){
+  return requestTelegram(TOKEN, 'copyMessage', makeReqBody(msg))
 }
 
-function forwardMessage(msg){
-  return requestTelegram('forwardMessage', makeReqBody(msg))
+function forwardMessage(TOKEN, msg){
+  return requestTelegram(TOKEN, 'forwardMessage', makeReqBody(msg))
 }
 
 /**
@@ -109,8 +113,10 @@ async function handleInitDB(event) {
  * https://core.telegram.org/bots/api#update
  */
 async function handleWebhook (event) {
+  const config = getConfig(event.env);
+  
   // Check secret
-  if (event.request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== SECRET) {
+  if (event.request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== config.SECRET) {
     return new Response('Unauthorized', { status: 403 })
   }
 
@@ -140,17 +146,20 @@ async function onUpdate (update, env) {
  * https://core.telegram.org/bots/api#message
  */
 async function onMessage (message, env) {
+  const config = getConfig(env);
+  
   if(message.text === '/start'){
     let startMsg = await fetch(startMsgUrl).then(r => r.text())
-    return sendMessage({
+    return sendMessage(config.TOKEN, {
       chat_id:message.chat.id,
       text:startMsg,
     })
   }
-  if(message.chat.id.toString() === ADMIN_UID){
+  
+  if(message.chat.id.toString() === config.ADMIN_UID){
     if(!message?.reply_to_message?.chat){
-      return sendMessage({
-        chat_id:ADMIN_UID,
+      return sendMessage(config.TOKEN, {
+        chat_id:config.ADMIN_UID,
         text:'使用方法，回复转发的消息，并发送回复消息，或者`/block`、`/unblock`、`/checkblock`等指令'
       })
     }
@@ -170,15 +179,15 @@ async function onMessage (message, env) {
     ).bind(message.reply_to_message.message_id).all();
     
     if (results.length === 0) {
-      return sendMessage({
-        chat_id: ADMIN_UID,
+      return sendMessage(config.TOKEN, {
+        chat_id: config.ADMIN_UID,
         text: '未找到对应的聊天记录'
       });
     }
     
     const guestChantId = results[0].chat_id;
     
-    return copyMessage({
+    return copyMessage(config.TOKEN, {
       chat_id: guestChantId,
       from_chat_id:message.chat.id,
       message_id:message.message_id,
@@ -188,6 +197,7 @@ async function onMessage (message, env) {
 }
 
 async function handleGuestMessage(message, env){
+  const config = getConfig(env);
   let chatId = message.chat.id;
   
   // 检查用户是否被屏蔽
@@ -198,14 +208,14 @@ async function handleGuestMessage(message, env){
   const isblocked = results.length > 0 && results[0].is_blocked;
   
   if(isblocked){
-    return sendMessage({
+    return sendMessage(config.TOKEN, {
       chat_id: chatId,
       text:'Your are blocked'
     })
   }
 
-  let forwardReq = await forwardMessage({
-    chat_id:ADMIN_UID,
+  let forwardReq = await forwardMessage(config.TOKEN, {
+    chat_id:config.ADMIN_UID,
     from_chat_id:message.chat.id,
     message_id:message.message_id
   })
@@ -220,12 +230,13 @@ async function handleGuestMessage(message, env){
 }
 
 async function handleNotify(message, env){
+  const config = getConfig(env);
   // 先判断是否是诈骗人员，如果是，则直接提醒
   // 如果不是，则根据时间间隔提醒：用户id，交易注意点等
   let chatId = message.chat.id;
   if(await isFraud(chatId)){
-    return sendMessage({
-      chat_id: ADMIN_UID,
+    return sendMessage(config.TOKEN, {
+      chat_id: config.ADMIN_UID,
       text:`检测到骗子，UID${chatId}`
     })
   }
@@ -243,8 +254,8 @@ async function handleNotify(message, env){
         "INSERT OR REPLACE INTO last_messages (chat_id, timestamp) VALUES (?, ?)"
       ).bind(chatId, Date.now()).run();
       
-      return sendMessage({
-        chat_id: ADMIN_UID,
+      return sendMessage(config.TOKEN, {
+        chat_id: config.ADMIN_UID,
         text:await fetch(notificationUrl).then(r => r.text())
       })
     }
@@ -252,23 +263,24 @@ async function handleNotify(message, env){
 }
 
 async function handleBlock(message, env){
+  const config = getConfig(env);
   // 获取要屏蔽的用户ID
   const { results } = await env.DB.prepare(
     "SELECT chat_id FROM message_mappings WHERE message_id = ?"
   ).bind(message.reply_to_message.message_id).all();
   
   if (results.length === 0) {
-    return sendMessage({
-      chat_id: ADMIN_UID,
+    return sendMessage(config.TOKEN, {
+      chat_id: config.ADMIN_UID,
       text: '未找到对应的聊天记录'
     });
   }
   
   const guestChantId = results[0].chat_id;
   
-  if(guestChantId.toString() === ADMIN_UID){
-    return sendMessage({
-      chat_id: ADMIN_UID,
+  if(guestChantId.toString() === config.ADMIN_UID){
+    return sendMessage(config.TOKEN, {
+      chat_id: config.ADMIN_UID,
       text:'不能屏蔽自己'
     })
   }
@@ -278,21 +290,22 @@ async function handleBlock(message, env){
     "INSERT OR REPLACE INTO user_blocks (chat_id, is_blocked) VALUES (?, TRUE)"
   ).bind(guestChantId).run();
 
-  return sendMessage({
-    chat_id: ADMIN_UID,
+  return sendMessage(config.TOKEN, {
+    chat_id: config.ADMIN_UID,
     text: `UID:${guestChantId}屏蔽成功`,
   })
 }
 
 async function handleUnBlock(message, env){
+  const config = getConfig(env);
   // 获取要解除屏蔽的用户ID
   const { results } = await env.DB.prepare(
     "SELECT chat_id FROM message_mappings WHERE message_id = ?"
   ).bind(message.reply_to_message.message_id).all();
   
   if (results.length === 0) {
-    return sendMessage({
-      chat_id: ADMIN_UID,
+    return sendMessage(config.TOKEN, {
+      chat_id: config.ADMIN_UID,
       text: '未找到对应的聊天记录'
     });
   }
@@ -304,21 +317,22 @@ async function handleUnBlock(message, env){
     "INSERT OR REPLACE INTO user_blocks (chat_id, is_blocked) VALUES (?, FALSE)"
   ).bind(guestChantId).run();
 
-  return sendMessage({
-    chat_id: ADMIN_UID,
+  return sendMessage(config.TOKEN, {
+    chat_id: config.ADMIN_UID,
     text:`UID:${guestChantId}解除屏蔽成功`,
   })
 }
 
 async function checkBlock(message, env){
+  const config = getConfig(env);
   // 获取要查询的用户ID
   const { results: msgResults } = await env.DB.prepare(
     "SELECT chat_id FROM message_mappings WHERE message_id = ?"
   ).bind(message.reply_to_message.message_id).all();
   
   if (msgResults.length === 0) {
-    return sendMessage({
-      chat_id: ADMIN_UID,
+    return sendMessage(config.TOKEN, {
+      chat_id: config.ADMIN_UID,
       text: '未找到对应的聊天记录'
     });
   }
@@ -332,8 +346,8 @@ async function checkBlock(message, env){
   
   const blocked = blockResults.length > 0 && blockResults[0].is_blocked;
 
-  return sendMessage({
-    chat_id: ADMIN_UID,
+  return sendMessage(config.TOKEN, {
+    chat_id: config.ADMIN_UID,
     text: `UID:${guestChantId}` + (blocked ? '被屏蔽' : '没有被屏蔽')
   })
 }
@@ -342,8 +356,9 @@ async function checkBlock(message, env){
  * Send plain text message
  * https://core.telegram.org/bots/api#sendmessage
  */
-async function sendPlainText (chatId, text) {
-  return sendMessage({
+async function sendPlainText (env, chatId, text) {
+  const config = getConfig(env);
+  return sendMessage(config.TOKEN, {
     chat_id: chatId,
     text
   })
@@ -354,12 +369,14 @@ async function sendPlainText (chatId, text) {
  * https://core.telegram.org/bots/api#setwebhook
  */
 async function registerWebhook (event, requestUrl, suffix, secret) {
+  const config = getConfig(event.env);
+  
   // 确保数据库初始化
   await initDatabase(event.env);
   
   // https://core.telegram.org/bots/api#setwebhook
   const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${suffix}`
-  const r = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: secret }))).json()
+  const r = await (await fetch(apiUrl(config.TOKEN, 'setWebhook', { url: webhookUrl, secret_token: secret }))).json()
   return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
 }
 
@@ -368,7 +385,8 @@ async function registerWebhook (event, requestUrl, suffix, secret) {
  * https://core.telegram.org/bots/api#setwebhook
  */
 async function unRegisterWebhook (event) {
-  const r = await (await fetch(apiUrl('setWebhook', { url: '' }))).json()
+  const config = getConfig(event.env);
+  const r = await (await fetch(apiUrl(config.TOKEN, 'setWebhook', { url: '' }))).json()
   return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
 }
 
