@@ -75,37 +75,31 @@ function forwardMessage(TOKEN, msg){
  */
 async function initDatabase(env) {
   try {
-    await env.DB.exec(DB_INIT);
-    console.log("数据库初始化成功");
+    console.log("开始检查数据库...");
+    
+    const checkTables = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table'"
+    ).all();
+    
+    console.log("现有表:", checkTables.results);
+    
+    return true;
   } catch (error) {
-    console.error("数据库初始化失败:", error);
+    console.error("数据库检查失败:", error);
+    throw error;
   }
 }
-
-/**
- * Wait for requests to the worker
- */
-addEventListener('fetch', event => {
-  const url = new URL(event.request.url)
-  if (url.pathname === WEBHOOK) {
-    event.respondWith(handleWebhook(event))
-  } else if (url.pathname === '/registerWebhook') {
-    event.respondWith(registerWebhook(event, url, WEBHOOK, SECRET))
-  } else if (url.pathname === '/unRegisterWebhook') {
-    event.respondWith(unRegisterWebhook(event))
-  } else if (url.pathname === '/initDB') {
-    event.respondWith(handleInitDB(event))
-  } else {
-    event.respondWith(new Response('No handler for this request'))
-  }
-})
 
 /**
  * 处理数据库初始化请求
  */
 async function handleInitDB(event) {
-  await initDatabase(event.env);
-  return new Response('数据库初始化完成');
+  try {
+    await initDatabase(event.env);
+    return new Response('数据库初始化完成，表已创建');
+  } catch (error) {
+    return new Response('数据库初始化失败: ' + error.message, { status: 500 });
+  }
 }
 
 /**
@@ -126,7 +120,7 @@ async function handleWebhook (event) {
   // Read request body synchronously
   const update = await event.request.json()
   // Deal with response asynchronously
-  event.waitUntil(onUpdate(update, event.env))
+  onUpdate(update, event.env)
 
   return new Response('Ok')
 }
@@ -399,3 +393,22 @@ async function isFraud(id){
   console.log(flag)
   return flag
 }
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const config = getConfig(env);
+    
+    if (url.pathname === config.WEBHOOK) {
+      return handleWebhook({ request, env, ctx });
+    } else if (url.pathname === '/registerWebhook') {
+      return registerWebhook({ request, env, ctx }, url, config.WEBHOOK, config.SECRET);
+    } else if (url.pathname === '/unRegisterWebhook') {
+      return unRegisterWebhook({ request, env, ctx });
+    } else if (url.pathname === '/initDB') {
+      return handleInitDB({ request, env, ctx });
+    } else {
+      return new Response('No handler for this request');
+    }
+  }
+};
