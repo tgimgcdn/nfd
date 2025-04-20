@@ -114,11 +114,15 @@ NFD是一个基于Cloudflare Workers平台的Telegram客服机器人，它允许
 ### 3. 创建D1数据库
 1. 在Cloudflare控制台创建新的D1数据库
 2. 将数据库绑定到Worker，绑定名称为`DB`
+3. 在D1数据库控制台执行以下SQL命令创建表：
+
+```sql
+CREATE TABLE message_mappings (message_id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL); CREATE TABLE user_blocks (chat_id INTEGER PRIMARY KEY, is_blocked BOOLEAN NOT NULL DEFAULT FALSE); CREATE TABLE last_messages (chat_id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL); 
+```
 
 ### 4. 初始化系统
-1. 访问`https://your-worker-url/initDB`初始化数据库表结构
-2. 访问`https://your-worker-url/registerWebhook`注册Webhook
-3. 如需取消Webhook，访问`https://your-worker-url/unRegisterWebhook`
+1. 访问`https://your-worker-url/registerWebhook`注册Webhook
+2. 如需取消Webhook，访问`https://your-worker-url/unRegisterWebhook`
 
 ## 使用指南
 
