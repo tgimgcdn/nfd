@@ -49,3 +49,129 @@ No Fraud / Node Forward Bot
 
 ## Thanks
 - [telegram-bot-cloudflare](https://github.com/cvzi/telegram-bot-cloudflare)
+
+
+
+
+
+# NFD Telegram客服机器人
+
+## 项目概述
+
+NFD是一个基于Cloudflare Workers平台的Telegram客服机器人，它允许多个普通用户与一个管理员通过机器人进行通信。机器人具有消息转发、用户管理、防诈骗检测等功能，是一个高效的客服解决方案。
+
+## 技术架构
+
+- **运行环境**：Cloudflare Workers
+- **数据存储**：Cloudflare D1 (SQL数据库)
+- **消息处理**：Telegram Bot API
+- **事件机制**：Webhook
+
+## 主要功能
+
+- **消息转发**：用户发送给机器人的消息会转发给管理员，管理员的回复也会转发给对应用户
+- **用户管理**：管理员可以屏蔽/解除屏蔽用户
+- **防诈骗检测**：自动检测潜在的诈骗用户并提醒管理员
+- **定时通知**：根据设定的时间间隔向管理员发送提醒消息
+- **自定义消息**：支持自定义开始消息和通知消息
+
+## 数据库结构
+
+系统使用D1数据库存储信息，包含以下表：
+
+1. **message_mappings**：存储消息ID到用户聊天ID的映射
+   - `message_id` - 消息ID (主键)
+   - `chat_id` - 用户聊天ID
+
+2. **user_blocks**：存储用户的屏蔽状态
+   - `chat_id` - 用户聊天ID (主键)
+   - `is_blocked` - 是否被屏蔽
+
+3. **last_messages**：记录用户最后一次消息的时间
+   - `chat_id` - 用户聊天ID (主键)
+   - `timestamp` - 时间戳
+
+## 环境变量配置
+
+部署前需要设置以下环境变量：
+
+- `ENV_BOT_TOKEN`：Telegram Bot Token，从@BotFather获取
+- `ENV_BOT_SECRET`：Webhook安全令牌，用于验证请求来源 
+- `ENV_ADMIN_UID`：管理员的Telegram用户ID
+
+## 安装步骤
+
+### 1. 创建Telegram机器人
+1. 在Telegram中联系@BotFather
+2. 使用`/newbot`命令创建新机器人
+3. 保存获得的API令牌
+
+### 2. 设置Cloudflare Workers
+1. 在Cloudflare Workers控制台创建新的Worker
+2. 上传`worker.js`代码
+3. 设置必要的环境变量
+
+### 3. 创建D1数据库
+1. 在Cloudflare控制台创建新的D1数据库
+2. 将数据库绑定到Worker，绑定名称为`DB`
+
+### 4. 初始化系统
+1. 访问`https://your-worker-url/initDB`初始化数据库表结构
+2. 访问`https://your-worker-url/registerWebhook`注册Webhook
+3. 如需取消Webhook，访问`https://your-worker-url/unRegisterWebhook`
+
+## 使用指南
+
+### 普通用户
+1. 在Telegram中搜索并开始与机器人对话
+2. 发送`/start`命令查看欢迎信息
+3. 直接发送消息与客服人员(管理员)沟通
+
+### 管理员
+管理员可以使用以下命令：
+
+- **回复用户**：直接回复转发到管理员的消息
+- **屏蔽用户**：回复用户消息并发送`/block`
+- **解除屏蔽**：回复用户消息并发送`/unblock`
+- **检查状态**：回复用户消息并发送`/checkblock`
+
+## 数据来源配置
+
+系统使用以下外部数据源：
+
+- **诈骗用户数据库**：`https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db`
+- **通知消息**：`https://raw.githubusercontent.com/LloydAsp/nfd/main/data/notification.txt`
+- **欢迎消息**：`https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md`
+
+可根据需要修改这些URL指向自己的数据源。
+
+## 从KV到D1的迁移说明
+
+本项目最初使用Cloudflare KV存储数据，现已迁移到D1数据库。主要优势：
+
+1. **结构化查询**：支持SQL查询语言，更灵活
+2. **关系型数据**：可以建立表之间的关系
+3. **事务支持**：支持ACID事务
+4. **更好的扩展性**：随着数据增长更容易管理
+5. **性能优化**：可以为查询创建索引
+
+迁移过程中，我们将原来的KV键值对映射到了关系型表结构，并优化了数据访问模式。
+
+## Webhook管理
+
+Webhook是Telegram机器人接收消息的机制，需要手动配置：
+
+- **注册Webhook**：访问`/registerWebhook`端点
+- **取消Webhook**：访问`/unRegisterWebhook`端点
+- **Webhook路径**：默认为`/endpoint`，可在代码中修改
+- **安全性**：使用环境变量中的SECRET进行请求验证
+
+注册成功后，Telegram会将机器人收到的所有消息通过HTTP POST请求发送到您配置的Webhook URL。
+
+## 防诈骗机制
+
+系统会自动检查用户是否存在于诈骗数据库中，如果匹配，会向管理员发送警告。诈骗用户数据库可通过修改`fraudDb`变量指向自己的数据源。
+
+## 定时通知
+
+系统会根据`NOTIFY_INTERVAL`设置(默认1小时)向管理员发送定期通知，可以在代码中修改此设置或通过设置`enable_notification = false`禁用此功能。 
